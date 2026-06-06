@@ -1,0 +1,19 @@
+﻿# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Env secrets
+.env
+.env.local
+
+# ChromaDB vector store
+backend/chroma_data/
+
+# Next.js
+frontend/.next/
+frontend/node_modules/
+frontend/out/
