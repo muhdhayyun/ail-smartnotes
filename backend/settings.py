@@ -12,10 +12,7 @@ class Settings(BaseSettings):
     chroma_dir: str = "./chroma_data"
     frontend_origin: str = "http://localhost:3000"
 
-    upstash_vector_rest_url: str = ""
-    upstash_vector_rest_token: str = ""
-
-    model_config = {"env_file": ".env"}
+    model_config = {"env_file": ".env", "extra": "ignore"}
 
     @property
     def active_database_url(self) -> str:

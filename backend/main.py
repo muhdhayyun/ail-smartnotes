@@ -65,7 +65,7 @@ def embed_note(note_id: uuid.UUID, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Note not found")
 
     try:
-        chunks_created = rag_embed(str(note_id), note.content)
+        chunks_created = rag_embed(db, str(note_id), note.content)
     except Exception as exc:
         logger.error("Embedding failed for %s: %s", note_id, exc)
         raise HTTPException(status_code=500, detail=f"Embedding failed: {exc}")
@@ -76,12 +76,12 @@ def embed_note(note_id: uuid.UUID, db: Session = Depends(get_db)):
 
 
 @app.post("/chat", response_model=ChatResponse)
-def chat(body: ChatRequest):
+def chat(body: ChatRequest, db: Session = Depends(get_db)):
     if not body.question or not body.question.strip():
         raise HTTPException(status_code=400, detail="question must not be empty")
 
     try:
-        sources = query_notes(body.question)
+        sources = query_notes(db, body.question)
         answer = ask_llm(body.question, sources)
     except Exception as exc:
         logger.error("Chat error: %s", exc)
@@ -101,7 +101,7 @@ def delete_note(note_id: uuid.UUID, db: Session = Depends(get_db)):
 
     if note.embedded:
         try:
-            delete_note_vectors(str(note_id))
+            delete_note_vectors(db, str(note_id))
         except Exception as exc:
             logger.error("Failed to delete vectors for %s: %s", note_id, exc)
 

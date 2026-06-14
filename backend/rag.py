@@ -1,19 +1,16 @@
 import logging
+import uuid
 from typing import Optional
 
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
+from sqlalchemy.orm import Session
+
 from settings import settings
 
 logger = logging.getLogger(__name__)
 
 _embedding_model: Optional[SentenceTransformer] = None
-_chroma_collection = None
-_upstash_index = None
-
-
-def _use_upstash() -> bool:
-    return bool(settings.upstash_vector_rest_url and settings.upstash_vector_rest_token)
 
 
 def get_embedding_model() -> SentenceTransformer:
@@ -21,32 +18,6 @@ def get_embedding_model() -> SentenceTransformer:
     if _embedding_model is None:
         _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
     return _embedding_model
-
-
-def get_upstash_index():
-    global _upstash_index
-    if _upstash_index is None:
-        from upstash_vector import Index
-        _upstash_index = Index(
-            url=settings.upstash_vector_rest_url,
-            token=settings.upstash_vector_rest_token,
-        )
-    return _upstash_index
-
-
-def get_chroma_collection():
-    global _chroma_collection
-    if _chroma_collection is None:
-        import chromadb
-        from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
-        client = chromadb.PersistentClient(path=settings.chroma_dir)
-        ef = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-        _chroma_collection = client.get_or_create_collection(
-            name="notes",
-            embedding_function=ef,
-            metadata={"hnsw:space": "cosine"},
-        )
-    return _chroma_collection
 
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]:
@@ -61,85 +32,60 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]
     return chunks
 
 
-def embed_note(note_id: str, content: str) -> int:
+def embed_note(db: Session, note_id: str, content: str) -> int:
+    from models import NoteChunk
+
     chunks = chunk_text(content)
+    model = get_embedding_model()
+    embeddings = model.encode(chunks)
 
-    if _use_upstash():
-        model = get_embedding_model()
-        index = get_upstash_index()
-        _delete_upstash_chunks(note_id)
-        embeddings = model.encode(chunks)
-        vectors = [
-            {
-                "id": f"{note_id}_chunk_{i}",
-                "vector": embeddings[i].tolist(),
-                "metadata": {"note_id": note_id, "chunk_index": i, "text": chunk},
-            }
-            for i, chunk in enumerate(chunks)
-        ]
-        index.upsert(vectors=vectors)
-    else:
-        collection = get_chroma_collection()
-        existing = collection.get(where={"note_id": note_id})
-        if existing["ids"]:
-            collection.delete(ids=existing["ids"])
-        ids = [f"{note_id}_chunk_{i}" for i in range(len(chunks))]
-        metadatas = [{"note_id": note_id, "chunk_index": i} for i in range(len(chunks))]
-        collection.add(ids=ids, documents=chunks, metadatas=metadatas)
+    db.query(NoteChunk).filter(
+        NoteChunk.note_id == uuid.UUID(note_id)
+    ).delete(synchronize_session=False)
 
+    for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+        db.add(NoteChunk(
+            id=uuid.uuid4(),
+            note_id=uuid.UUID(note_id),
+            chunk_index=i,
+            text=chunk,
+            embedding=embedding.tolist(),
+        ))
+
+    db.commit()
     return len(chunks)
 
 
-def _delete_upstash_chunks(note_id: str, max_chunks: int = 200) -> None:
-    index = get_upstash_index()
-    ids = [f"{note_id}_chunk_{i}" for i in range(max_chunks)]
-    index.delete(ids=ids)
+def delete_note_vectors(db: Session, note_id: str) -> None:
+    from models import NoteChunk
+
+    db.query(NoteChunk).filter(
+        NoteChunk.note_id == uuid.UUID(note_id)
+    ).delete(synchronize_session=False)
+    db.commit()
 
 
-def delete_note_vectors(note_id: str) -> None:
-    if _use_upstash():
-        _delete_upstash_chunks(note_id)
-    else:
-        collection = get_chroma_collection()
-        existing = collection.get(where={"note_id": note_id})
-        if existing["ids"]:
-            collection.delete(ids=existing["ids"])
+def query_notes(db: Session, question: str, n_results: int = 3) -> list[dict]:
+    from models import NoteChunk
 
+    model = get_embedding_model()
+    embedding = model.encode([question])[0].tolist()
 
-def query_notes(question: str, n_results: int = 3) -> list[dict]:
-    if _use_upstash():
-        model = get_embedding_model()
-        index = get_upstash_index()
-        embedding = model.encode([question])[0].tolist()
-        results = index.query(vector=embedding, top_k=n_results, include_metadata=True)
-        return [
-            {
-                "note_id": r.metadata["note_id"],
-                "chunk_index": int(r.metadata["chunk_index"]),
-                "text": r.metadata["text"],
-            }
-            for r in results
-            if r.metadata
-        ]
-    else:
-        collection = get_chroma_collection()
-        count = collection.count()
-        if count == 0:
-            return []
-        results = collection.query(
-            query_texts=[question],
-            n_results=min(n_results, count),
-        )
-        sources = []
-        if results["documents"] and results["documents"][0]:
-            for i, doc in enumerate(results["documents"][0]):
-                metadata = results["metadatas"][0][i]
-                sources.append({
-                    "note_id": metadata["note_id"],
-                    "chunk_index": int(metadata["chunk_index"]),
-                    "text": doc,
-                })
-        return sources
+    chunks = (
+        db.query(NoteChunk)
+        .order_by(NoteChunk.embedding.cosine_distance(embedding))
+        .limit(n_results)
+        .all()
+    )
+
+    return [
+        {
+            "note_id": str(chunk.note_id),
+            "chunk_index": chunk.chunk_index,
+            "text": chunk.text,
+        }
+        for chunk in chunks
+    ]
 
 
 def ask_llm(question: str, sources: list[dict]) -> str:
