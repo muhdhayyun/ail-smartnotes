@@ -9,7 +9,6 @@ class Settings(BaseSettings):
 
     openrouter_api_key: str
     llm_model: str = "openai/gpt-4o-mini"
-    chroma_dir: str = "./chroma_data"
     frontend_origin: str = "http://localhost:3000"
 
     model_config = {"env_file": ".env", "extra": "ignore"}
